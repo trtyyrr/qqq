@@ -1,4 +1,4 @@
-name: Build OnePlus Pad Pro (Final Fixed)
+name: Build OnePlus Pad Pro (Final Fix v2)
 on:
   workflow_dispatch:  # 手动触发
 
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-22.04
     
     steps:
-    - name: 1. 环境准备 (清理磁盘)
+    - name: 1. 环境准备
       uses: jlumbroso/free-disk-space@main
       with:
         tool-cache: true
@@ -18,27 +18,24 @@ jobs:
         large-packages: true
         swap-storage: true
 
-    - name: 2. 安装编译依赖
+    - name: 2. 安装依赖
       run: |
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev bc rsync
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev bc rsync gcc-aarch64-linux-gnu
         
-        # 安装 Repo 工具
         mkdir -p ~/bin
         curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
         chmod a+x ~/bin/repo
         echo "$HOME/bin" >> $GITHUB_PATH
         
-        # 配置 Git
         git config --global user.name "GitHub Action"
         git config --global user.email "action@github.com"
 
-    - name: 3. 同步源码 (本地Manifest修复版)
+    - name: 3. 同步源码
       run: |
         mkdir -p kernel_workspace
         cd kernel_workspace
         
-        # --- 建立本地 Manifest 仓库 (核心修复) ---
         mkdir -p local_manifest
         cd local_manifest
         git init
@@ -46,7 +43,6 @@ jobs:
         git config user.name "GitHub Action"
         git config user.email "action@github.com"
         
-        # 写入配置
         cat <<EOF > default.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <manifest>
@@ -73,52 +69,46 @@ jobs:
         </manifest>
         EOF
         
-        # 提交配置
         git add default.xml
         git commit -m "Init manifest"
         MANIFEST_PATH=$(pwd)
         cd ..
         
-        # 极速同步
         repo init -u "$MANIFEST_PATH" -m default.xml --depth=1
         repo sync -c -j$(nproc) --no-tags --no-clone-bundle --prune
 
-    - name: 4. 注入功能 (SukiSU + SUSFS + BBG)
+    - name: 4. 注入功能 (修复版)
       run: |
-       cd kernel_workspace/kernel_platform/common
+        cd kernel_workspace/kernel_platform/common
         
         # --- SUSFS Inline Hook ---
-        echo ">>> 下载 SUSFS..."
+        echo ">>> SUSFS..."
         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp
         cp susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
-        
-        echo ">>> 应用 Inline Hook..."
         PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-        if git apply "$PATCH_FILE"; then
-            echo "✅ SUSFS Patch Applied"
-        else
-            echo "⚠️ 标准Patch失败，尝试宽松模式..."
-            git apply --ignore-whitespace --ignore-space-change "$PATCH_FILE" || git apply --reject "$PATCH_FILE" || true
-        fi
+        git apply "$PATCH_FILE" || git apply --ignore-whitespace --ignore-space-change "$PATCH_FILE" || git apply --reject "$PATCH_FILE" || true
 
-        # --- SukiSU (RSuntK) ---
-        echo ">>> 集成 SukiSU..."
+        # --- SukiSU (修复 Kconfig 缺失问题) ---
+        echo ">>> SukiSU..."
         git clone https://github.com/RSuntK/KernelSU.git drivers/su
+        # 1. 修改 Makefile
         if ! grep -q "drivers/su" drivers/Makefile; then echo "obj-y += su/" >> drivers/Makefile; fi
+        # 2. 修改 Kconfig (核心修复：这会让构建系统识别 CONFIG_KSU)
+        if ! grep -q "drivers/su" drivers/Kconfig; then echo "source \"drivers/su/Kconfig\"" >> drivers/Kconfig; fi
 
-        # --- BBG (Baseband Guard) ---
-        echo ">>> 集成 BBG..."
+        # --- BBG ---
+        echo ">>> BBG..."
         git clone https://github.com/vc-teahouse/Baseband-guard.git security/bbguard
         if ! grep -q "bbguard" security/Makefile; then
             echo "obj-\$(CONFIG_BBGUARD) += bbguard/" >> security/Makefile
             echo "source \"security/bbguard/Kconfig\"" >> security/Kconfig
         fi
 
-    - name: 5. 终极内核配置 (BBR + ZRAM + AI)
+    - name: 5. 内核配置与清洗 (Sanitize)
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        echo ">>> 启用全套配置..."
+        echo ">>> 应用配置..."
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
             --enable CONFIG_KSU \
             --enable CONFIG_SUSFS \
@@ -145,8 +135,18 @@ jobs:
             --disable CONFIG_MODULE_SIG_ALL \
             --disable CONFIG_DEBUG_KERNEL \
             --disable CONFIG_DEBUG_INFO
+        
+        # --- 自动清洗配置 (修复 Mismatch 报错) ---
+        echo ">>> 正在清洗 Defconfig..."
+        # 找到预编译的 Clang 路径
+        CLANG_BIN=$(ls -d ../prebuilts/clang/host/linux-x86/clang-r*/bin | head -n 1)
+        export PATH=$CLANG_BIN:$PATH
+        # 使用 make savedefconfig 重新生成标准化的配置文件
+        make ARCH=arm64 savedefconfig
+        # 覆盖回去，这样文件内容就完全合法了
+        mv defconfig arch/arm64/configs/gki_defconfig
 
-    - name: 6. 编译内核 (Bazel / SM8650)
+    - name: 6. 编译内核 (Bazel)
       run: |
         cd kernel_workspace/kernel_platform
         LTO=thin ./build_with_bazel.py -t pineapple gki --config=stamp
