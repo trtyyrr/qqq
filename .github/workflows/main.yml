@@ -33,7 +33,7 @@ jobs:
         git config --global user.name "GitHub Action"git config --global user.email "action@github.com"
 
     -  name: 3. 同步源码 (修正版)
-      run: |
+       run: |
         mkdir -p kernel_workspace
         cd kernel_workspace
         
