@@ -1,14 +1,14 @@
-name: Build OnePlus Pad Pro (Ultimate AI Kernel)
+name: Build OnePlus Pad Pro (Final Fixed)
 on:
-  workflow_dispatch:  # 手动触发按钮
+  workflow_dispatch:  # 手动触发
 
 jobs:
   build:
-    name: Compile with SukiSU & AI Features
+    name: Compile Kernel
     runs-on: ubuntu-22.04
     
     steps:
-    - name: 1. 环境准备 (清理 30GB+)
+    - name: 1. 环境准备 (清理磁盘)
       uses: jlumbroso/free-disk-space@main
       with:
         tool-cache: true
@@ -29,24 +29,24 @@ jobs:
         chmod a+x ~/bin/repo
         echo "$HOME/bin" >> $GITHUB_PATH
         
-        # 配置 Git 身份
-        git config --global user.name "GitHub Action"git config --global user.email "action@github.com"
+        # 配置 Git
+        git config --global user.name "GitHub Action"
+        git config --global user.email "action@github.com"
 
-    -  name: 3. 同步源码 (修正版)
-       run: |
+    - name: 3. 同步源码 (本地Manifest修复版)
+      run: |
         mkdir -p kernel_workspace
         cd kernel_workspace
         
-        # --- 修复核心：建立本地 Manifest 仓库 ---
+        # --- 建立本地 Manifest 仓库 (核心修复) ---
         mkdir -p local_manifest
         cd local_manifest
-        
-        # 1. 初始化 Git
         git init
         git branch -m main
-        git config user.name "GitHub Action"git config user.email "action@github.com"
+        git config user.name "GitHub Action"
+        git config user.email "action@github.com"
         
-        # 2. 写入配置
+        # 写入配置
         cat <<EOF > default.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <manifest>
@@ -72,24 +72,22 @@ jobs:
           <project remote="clo-la" name="kernelplatform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8" path="kernel_platform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8" revision="dd099b5d68822602228e2af66693e61e7b54e0a9" upstream="refs/heads/ks-kernel.lnx.3.0.r1-rel"><linkfile dest="kernel_platform/build/build-tools/sysroot" src="sysroot"/></project>
         </manifest>
         EOF
-        # 3. 提交到本地 Git
+        
+        # 提交配置
         git add default.xml
         git commit -m "Init manifest"
-        
-        # 4. 获取当前绝对路径 (Repo 需要)
         MANIFEST_PATH=$(pwd)
         cd ..
         
-        # --- 初始化 Repo ---
-        # 现在 -u 指向的是一个真正的 Git 仓库目录，不会再报错了
+        # 极速同步
         repo init -u "$MANIFEST_PATH" -m default.xml --depth=1
         repo sync -c -j$(nproc) --no-tags --no-clone-bundle --prune
 
-            - name: 4. 功能注入 (SukiSU + SUSFS + BBG)
-              run: |
-        cd kernel_workspace/kernel_platform/common
+    - name: 4. 注入功能 (SukiSU + SUSFS + BBG)
+      run: |
+       cd kernel_workspace/kernel_platform/common
         
-        # --- SUSFS 内联挂钩 ---
+        # --- SUSFS Inline Hook ---
         echo ">>> 下载 SUSFS..."
         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp
         cp susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
@@ -120,7 +118,7 @@ jobs:
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        echo ">>> 正在启用全套黑科技配置..."
+        echo ">>> 启用全套配置..."
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
             --enable CONFIG_KSU \
             --enable CONFIG_SUSFS \
@@ -130,25 +128,19 @@ jobs:
             --enable CONFIG_BBGUARD \
             --enable CONFIG_TCP_CONG_BBR \
             --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
-            \
             --enable CONFIG_ZRAM \
             --enable CONFIG_ZRAM_WRITEBACK \
             --enable CONFIG_ZRAM_MEMORY_TRACKING \
             --enable CONFIG_CRYPTO_ZSTD \
             --enable CONFIG_ZRAM_DEF_COMP_ZSTD \
-            \
             --enable CONFIG_LRU_GEN \
             --enable CONFIG_LRU_GEN_ENABLED \
             --enable CONFIG_LRU_GEN_STATS \
-            \
             --enable CONFIG_UCLAMP_TASK \
             --enable CONFIG_UCLAMP_TASK_GROUP \
             --enable CONFIG_ENERGY_MODEL \
             --enable CONFIG_SCHED_WALT \
-            \
             --enable CONFIG_WQ_POWER_EFFICIENT_DEFAULT \
-            --enable CONFIG_RCU_BOOST \
-            \
             --disable CONFIG_TCP_CONG_CUBIC \
             --disable CONFIG_MODULE_SIG_ALL \
             --disable CONFIG_DEBUG_KERNEL \
@@ -164,15 +156,11 @@ jobs:
         cd kernel_workspace
         git clone https://github.com/osm0sis/AnyKernel3
         cd AnyKernel3
-        
-        # 提取 Image 和 dtbo
         cp ../kernel_platform/out/pineapple/dist/Image .
         [ -f ../kernel_platform/out/pineapple/dist/dtbo.img ] && cp ../kernel_platform/out/pineapple/dist/dtbo.img .
-
-        # 生成最终 ZIP
-        zip -r9 OnePlusPadPro_Ultimate_Kernel.zip * -x .git README.md *placeholder
+        zip -r9 OnePlusPadPro_Final_Kernel.zip * -x .git README.md *placeholder
         
     - uses: actions/upload-artifact@v4
       with:
-        name: OnePlusPadPro_Ultimate_Kernel
-        path: kernel_workspace/AnyKernel3/OnePlusPadPro_Ultimate_Kernel.zip
+        name: OnePlusPadPro_Final_Kernel
+        path: kernel_workspace/AnyKernel3/OnePlusPadPro_Final_Kernel.zip
