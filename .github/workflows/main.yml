@@ -1,4 +1,4 @@
-name: Build OnePlus Pad Pro (Final Fix v7)
+name: Build OnePlus Pad Pro (Final Fix v8)
 on:
   workflow_dispatch:  # 手动触发
 
@@ -21,7 +21,6 @@ jobs:
     - name: 2. 安装依赖
       run: |
         sudo apt-get update
-        # 移除了冲突包，加入了 bc, patch, rsync 等必备工具
         sudo apt-get install -y git patch ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev bc rsync gcc-aarch64-linux-gnu
         
         mkdir -p ~/bin
@@ -29,8 +28,7 @@ jobs:
         chmod a+x ~/bin/repo
         echo "$HOME/bin" >> $GITHUB_PATH
         
-        git config --global user.name "GitHub Action"
-        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"git config --global user.email "action@github.com"
 
     - name: 3. 同步源码
       run: |
@@ -68,8 +66,6 @@ jobs:
           <project remote="clo-la" name="kernelplatform/prebuilts-master/clang/host/linux-x86" path="kernel_platform/prebuilts/clang/host/linux-x86" revision="28b975ada54f8610ed531a6b57253aed10e7c87d" upstream="refs/heads/ks-kernel.lnx.3.0.r1-rel"/>
           <project remote="clo-la" name="kernelplatform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8" path="kernel_platform/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8" revision="dd099b5d68822602228e2af66693e61e7b54e0a9" upstream="refs/heads/ks-kernel.lnx.3.0.r1-rel"><linkfile dest="kernel_platform/build/build-tools/sysroot" src="sysroot"/></project>
         </manifest>
-        EOF
-        
         git add default.xml
         git commit -m "Init manifest"
         MANIFEST_PATH=$(pwd)
@@ -78,51 +74,39 @@ jobs:
         repo init -u "$MANIFEST_PATH" -m default.xml --depth=1
         repo sync -c -j$(nproc) --no-tags --no-clone-bundle --prune
 
-    - name: 4. 注入功能 (物理植入模式)
+    - name: 4. 注入功能 (稳健版)
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        # --- SUSFS (Patch模式) ---
+        # --- SUSFS (Patch) ---
         echo ">>> SUSFS Patching..."
         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp
         cp susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
-        
         PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-        # 使用 patch 命令并允许模糊匹配 (Fuzz)，这是关键
         patch -p1 --fuzz=3 < "$PATCH_FILE" || true
 
-        # --- SukiSU (物理复制模式) ---
+        # --- SukiSU (脚本安装模式) ---
         echo ">>> SukiSU Integration..."
-        git clone https://github.com/RSuntK/KernelSU.git tmp_ksu
-        
-        # 物理复制到 drivers/su (避开 Bazel 沙盒限制)
-        mkdir -p drivers/su
-        cp -r tmp_ksu/kernel/* drivers/su/
-        
-        # 注册到内核构建系统
-        echo "Registering SukiSU..."
-        if ! grep -q "drivers/su" drivers/Makefile; then echo "obj-y += su/" >> drivers/Makefile; fi
-        if ! grep -q "drivers/su" drivers/Kconfig; then echo "source \"drivers/su/Kconfig\"" >> drivers/Kconfig; fi
+        # 使用官方 setup.sh 但通过 sed 将其指向 RSuntK 仓库
+        curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | sed 's|tiann/KernelSU|RSuntK/KernelSU|g' | bash -
 
         # --- BBG ---
-        echo ">>> BBG..."
+        echo ">>> BBG Integration..."
         git clone https://github.com/vc-teahouse/Baseband-guard.git security/bbguard
         if ! grep -q "bbguard" security/Makefile; then
             echo "obj-\$(CONFIG_BBGUARD) += bbguard/" >> security/Makefile
             echo "source \"security/bbguard/Kconfig\"" >> security/Kconfig
         fi
 
-    - name: 5. 内核配置与标准化
+    - name: 5. 配置清洗与应用
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        echo ">>> 修改配置..."
+        echo ">>> Setting up Configs..."
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
             --enable CONFIG_KSU \
             --enable CONFIG_SUSFS \
             --enable CONFIG_KSU_SUSFS \
-            --enable CONFIG_KSU_SUSFS_SUS_PATH \
-            --enable CONFIG_KSU_SUSFS_SUS_MOUNT \
             --enable CONFIG_BBGUARD \
             --enable CONFIG_TCP_CONG_BBR \
             --set-str CONFIG_DEFAULT_TCP_CONG "bbr" \
@@ -144,23 +128,17 @@ jobs:
             --disable CONFIG_DEBUG_KERNEL \
             --disable CONFIG_DEBUG_INFO
         
-        echo ">>> 标准化 Defconfig (解决 Mismatch)..."
-        # 1. 设置 ARCH 环境变量
-        export ARCH=arm64
-        # 2. 设置 PATH 以包含 Clang (make savedefconfig 需要编译器检查)
+        echo ">>> Sanitizing Defconfig..."
         CLANG_BIN=$(ls -d ../prebuilts/clang/host/linux-x86/clang-r*/bin | head -n 1)
         export PATH=$CLANG_BIN:$PATH
-        # 3. 运行 savedefconfig 重新排序
-        make savedefconfig
-        # 4. 覆盖原文件
+        make ARCH=arm64 savedefconfig
         mv defconfig arch/arm64/configs/gki_defconfig
-        echo "Defconfig cleaned successfully!"
 
-    - name: 6. 编译内核 (Bazel)
+    - name: 6. 编译内核 (关闭 LTO)
       run: |
         cd kernel_workspace/kernel_platform
-        # LTO=thin 提升速度，config=stamp 确保版本号
-        LTO=thin ./build_with_bazel.py -t pineapple gki --config=stamp
+        # 核心修改：LTO=none。这是解决 Error 2 的关键。
+        ./build_with_bazel.py -t pineapple gki --config=stamp LTO=none
 
     - name: 7. 打包与上传
       run: |
