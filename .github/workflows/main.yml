@@ -1,4 +1,4 @@
-name: Build OnePlus Pad Pro (Final Fix v4)
+name: Build OnePlus Pad Pro (Final Fix v5)
 on:
   workflow_dispatch:  # 手动触发
 
@@ -18,10 +18,9 @@ jobs:
         large-packages: true
         swap-storage: true
 
-    - name: 2. 安装依赖 (修复版)
+    - name: 2. 安装依赖
       run: |
         sudo apt-get update
-        # 新增 patch 工具，移除冲突包
         sudo apt-get install -y git patch ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev bc rsync gcc-aarch64-linux-gnu
         
         mkdir -p ~/bin
@@ -78,23 +77,26 @@ jobs:
         repo init -u "$MANIFEST_PATH" -m default.xml --depth=1
         repo sync -c -j$(nproc) --no-tags --no-clone-bundle --prune
 
-    - name: 4. 注入功能 (使用 Patch 命令修复)
+    - name: 4. 注入功能 (修复 SukiSU 路径)
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        # --- SUSFS Inline Hook (使用 patch 命令) ---
+        # --- SUSFS Inline Hook ---
         echo ">>> SUSFS..."
         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp
         cp susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
-        
-        # 核心修改：使用 patch -p1 替代 git apply，忽略 git 报错
         PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-        echo "Applying patch using 'patch' command..."
         patch -p1 < "$PATCH_FILE" || true
 
-        # --- SukiSU ---
-        echo ">>> SukiSU..."
-        git clone https://github.com/RSuntK/KernelSU.git drivers/su
+        # --- SukiSU (核心修复：使用官方目录结构) ---
+        echo ">>> SukiSU Integration..."
+        # 1. 克隆到根目录 KernelSU 文件夹
+        git clone https://github.com/RSuntK/KernelSU.git KernelSU
+        # 2. 创建软链接：drivers/su -> ../KernelSU/kernel
+        # 这样 drivers/su/Kconfig 实际上就是访问 KernelSU/kernel/Kconfig，路径就对了！
+        ln -sf ../KernelSU/kernel drivers/su
+        
+        # 3. 注册驱动
         if ! grep -q "drivers/su" drivers/Makefile; then echo "obj-y += su/" >> drivers/Makefile; fi
         if ! grep -q "drivers/su" drivers/Kconfig; then echo "source \"drivers/su/Kconfig\"" >> drivers/Kconfig; fi
 
@@ -144,7 +146,7 @@ jobs:
         make ARCH=arm64 savedefconfig
         mv defconfig arch/arm64/configs/gki_defconfig
 
-    - name: 6. 编译内核
+    - name: 6. 编译内核 (Bazel)
       run: |
         cd kernel_workspace/kernel_platform
         LTO=thin ./build_with_bazel.py -t pineapple gki --config=stamp
