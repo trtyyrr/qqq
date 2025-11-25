@@ -1,4 +1,4 @@
-name: Build OnePlus Pad Pro (Final Fix v6)
+name: Build OnePlus Pad Pro (Final Fix v7)
 on:
   workflow_dispatch:  # 手动触发
 
@@ -21,6 +21,7 @@ jobs:
     - name: 2. 安装依赖
       run: |
         sudo apt-get update
+        # 移除了冲突包，加入了 bc, patch, rsync 等必备工具
         sudo apt-get install -y git patch ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev bc rsync gcc-aarch64-linux-gnu
         
         mkdir -p ~/bin
@@ -77,30 +78,28 @@ jobs:
         repo init -u "$MANIFEST_PATH" -m default.xml --depth=1
         repo sync -c -j$(nproc) --no-tags --no-clone-bundle --prune
 
-    - name: 4. 注入功能 (物理复制模式)
+    - name: 4. 注入功能 (物理植入模式)
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        # --- SUSFS Inline Hook ---
-        echo ">>> SUSFS..."
+        # --- SUSFS (Patch模式) ---
+        echo ">>> SUSFS Patching..."
         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_temp
         cp susfs_temp/kernel_patches/include/linux/susfs.h include/linux/
         
-        # 应用补丁 (强制模式)
         PATCH_FILE="susfs_temp/kernel_patches/50_add_susfs_in_gki-android14-6.1.patch"
-        echo "Applying SUSFS patch..."
-        patch -p1 < "$PATCH_FILE" || true
+        # 使用 patch 命令并允许模糊匹配 (Fuzz)，这是关键
+        patch -p1 --fuzz=3 < "$PATCH_FILE" || true
 
-        # --- SukiSU (物理复制修复) ---
-        echo ">>> SukiSU..."
-        # 1. 克隆到临时目录
+        # --- SukiSU (物理复制模式) ---
+        echo ">>> SukiSU Integration..."
         git clone https://github.com/RSuntK/KernelSU.git tmp_ksu
         
-        # 2. 创建目录并物理复制 (避开 Bazel 沙盒限制)
+        # 物理复制到 drivers/su (避开 Bazel 沙盒限制)
         mkdir -p drivers/su
         cp -r tmp_ksu/kernel/* drivers/su/
         
-        # 3. 注册驱动
+        # 注册到内核构建系统
         echo "Registering SukiSU..."
         if ! grep -q "drivers/su" drivers/Makefile; then echo "obj-y += su/" >> drivers/Makefile; fi
         if ! grep -q "drivers/su" drivers/Kconfig; then echo "source \"drivers/su/Kconfig\"" >> drivers/Kconfig; fi
@@ -113,11 +112,11 @@ jobs:
             echo "source \"security/bbguard/Kconfig\"" >> security/Kconfig
         fi
 
-    - name: 5. 内核配置与清洗
+    - name: 5. 内核配置与标准化
       run: |
         cd kernel_workspace/kernel_platform/common
         
-        echo ">>> 应用配置..."
+        echo ">>> 修改配置..."
         ./scripts/config --file arch/arm64/configs/gki_defconfig \
             --enable CONFIG_KSU \
             --enable CONFIG_SUSFS \
@@ -145,15 +144,22 @@ jobs:
             --disable CONFIG_DEBUG_KERNEL \
             --disable CONFIG_DEBUG_INFO
         
-        echo ">>> 清洗 Defconfig..."
+        echo ">>> 标准化 Defconfig (解决 Mismatch)..."
+        # 1. 设置 ARCH 环境变量
+        export ARCH=arm64
+        # 2. 设置 PATH 以包含 Clang (make savedefconfig 需要编译器检查)
         CLANG_BIN=$(ls -d ../prebuilts/clang/host/linux-x86/clang-r*/bin | head -n 1)
         export PATH=$CLANG_BIN:$PATH
-        make ARCH=arm64 savedefconfig
+        # 3. 运行 savedefconfig 重新排序
+        make savedefconfig
+        # 4. 覆盖原文件
         mv defconfig arch/arm64/configs/gki_defconfig
+        echo "Defconfig cleaned successfully!"
 
     - name: 6. 编译内核 (Bazel)
       run: |
         cd kernel_workspace/kernel_platform
+        # LTO=thin 提升速度，config=stamp 确保版本号
         LTO=thin ./build_with_bazel.py -t pineapple gki --config=stamp
 
     - name: 7. 打包与上传
